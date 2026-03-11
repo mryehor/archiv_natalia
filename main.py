@@ -28,6 +28,7 @@ def load_config():
             "API_HASH": os.environ.get("API_HASH", ""),
             "SESSION": os.environ.get("STRING_SESSION", ""),
             "ARCHIVE_GROUP_ID": int(os.environ.get("ARCHIVE_GROUP_ID", 0)),
+            "SECOND_GROUP_ID": int(os.environ.get("SECOND_ARCHIVE_GROUP_ID", 0)),
             "PORT": int(os.environ.get("PORT", 8080))
         }
     except ValueError as e:
@@ -74,34 +75,41 @@ async def archive_message_handler(event):
         sender_name = getattr(chat, 'title', getattr(chat, 'first_name', 'Неизвестный'))
         topic_title = f"{sender_name} [{chat_id}]"
 
+        target_groups =[CONFIG.get("ARCHIVE_GROUP_ID", 0), CONFIG.get("SECOND_ARCHIVE_GROUP_ID", 0)]
         # Создаем тему, если ее нет
-        if chat_id not in topics_cache:
-            logger.info(f"Создаю новую тему: {topic_title}")
-            try:
-                topic = await client(functions.channels.CreateForumTopicRequest(
-                    channel=CONFIG["ARCHIVE_GROUP_ID"],
-                    title=topic_title,
-                    icon_color=0x6FB9F0 
-                ))
-                topics_cache[chat_id] = topic.updates[0].id
-            except ChatAdminRequiredError:
-                logger.error("Нет прав на создание тем! Проверьте, что бот админ и темы включены.")
-                return
-            except FloodWaitError as e:
-                logger.warning(f"Ждем {e.seconds} секунд от спам-фильтра...")
-                await asyncio.sleep(e.seconds)
-                return
+        for group_id in target_groups:
+            if group_id == 0: 
+                continue # Пропускаем, если ID группы не заполнен
 
-        topic_id = topics_cache[chat_id]
-        
-        # Пересылаем сообщение напрямую через продвинутый API-запрос
-        await client(functions.messages.ForwardMessagesRequest(
-            from_peer=chat_id,
-            id=[event.message.id],
-            to_peer=CONFIG["ARCHIVE_GROUP_ID"],
-            top_msg_id=topic_id,
-            random_id=[random.randint(1, 999999999)]
-        ))
+            # Создаем тему в этой конкретной группе, если её еще нет в кэше
+            cache_key = f"{chat_id}_{group_id}"
+            if cache_key not in topics_cache:
+                logger.info(f"Создаю тему в группе {group_id}...")
+                try:
+                    topic = await client(functions.channels.CreateForumTopicRequest(
+                        channel=group_id,
+                        title=topic_title,
+                        icon_color=0x6FB9F0 
+                    ))
+                    topics_cache[cache_key] = topic.updates[0].id
+                except ChatAdminRequiredError:
+                    logger.error(f"Нет прав на создание тем в группе {group_id}! Проверьте права бота.")
+                    continue # Идем к следующей группе, не прерывая работу
+                except FloodWaitError as e:
+                    logger.warning(f"Ждем {e.seconds} секунд от спам-фильтра...")
+                    await asyncio.sleep(e.seconds)
+                    continue
+
+            target_topic_id = topics_cache[cache_key]
+
+            # Пересылаем сообщение напрямую в эту группу и в эту тему
+            await client(functions.messages.ForwardMessagesRequest(
+                from_peer=chat_id,
+                id=[event.message.id],
+                to_peer=group_id,
+                top_msg_id=target_topic_id,
+                random_id=[random.randint(1, 999999999)]
+            ))
         
         logger.info(f"Сообщение от {sender_name} успешно сохранено в архив.")
 
@@ -126,4 +134,5 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+
         logger.info("Программа остановлена вручную.")
